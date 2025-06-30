@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "geniga"
+version = "0.1.0"
+description = "Generative IGA utilities, geometry generation, and neural network models for isogeometric analysis."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [ { name = "Ion G-Ion" } ]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent"
+]
+
+dependencies = [
+    "torch>=2.0",
+    "h5py",
+    "numpy",
+    "scipy",
+    "einops>=0.6",
+    "pyiga>=1.5"
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["geniga"]
