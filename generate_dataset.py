@@ -8,147 +8,158 @@ from scipy.linalg import cho_solve, cho_factor
 import scipy.sparse.linalg
 import h5py
 from tqdm import tqdm
+import os
 from geniga.geometry.random import generate_random_geom as generate_geom, generate_random_bcs as generate_bcs
 
-def _deprecated_generate_geom(N=(128, 128), deg=2, epsilon_strain=4.0, epsilon_rotation=3.0):
-    Nx, Ny = N  # Unpack N into Nx and Ny
-    # Step 1: Grid
-    x_max = np.random.uniform(0.5, 2.5)
-    y_max = np.random.uniform(0.5, 2.5)
-    x = np.linspace(0, x_max, Nx)
-    y = np.linspace(0, y_max, Ny)
-    X, Y = np.meshgrid(x, y, indexing='ij')
 
-    J = 0.0
-    while J < 0.08:
-        
-        # Step 2: Generate symmetric (strain) and antisymmetric (rotation) fields
-        h_xx = epsilon_strain * gaussian_filter(np.random.randn(Nx, Ny), sigma=5) 
-        h_yy = epsilon_strain * gaussian_filter(np.random.randn(Nx, Ny), sigma=5)
-        h_xy = epsilon_strain * gaussian_filter(np.random.randn(Nx, Ny), sigma=5)
 
-        rotation_field = epsilon_rotation * gaussian_filter(np.random.randn(Nx, Ny), sigma=8)
-        rotation_field = epsilon_rotation * np.random.randn() * np.exp(-((X-np.random.rand()*x.max())**2 + (Y-np.random.rand()*y.max())**2)/0.5)
-
-        # Step 3: Build divergence terms
-        div_hx = np.gradient(h_xx, x, axis=0) + np.gradient(h_xy, y, axis=1)
-        div_hy = np.gradient(h_xy, x, axis=0) + np.gradient(h_yy, y, axis=1)
-
-        div_hx += np.gradient(rotation_field, y, axis=1)
-        div_hy += -np.gradient(rotation_field, x, axis=0)
-
-        # Step 4: Fourier solve
-        kx = np.fft.fftfreq(Nx, d=x[1]-x[0]) * 2*np.pi
-        ky = np.fft.fftfreq(Ny, d=y[1]-y[0]) * 2*np.pi
-        KX, KY = np.meshgrid(kx, ky, indexing='ij')
-        Laplacian = -(KX**2 + KY**2)
-        Laplacian[0, 0] = 1.0
-
-        div_hx_hat = fft2(div_hx)
-        div_hy_hat = fft2(div_hy)
-
-        u_x_hat = div_hx_hat / Laplacian
-        u_y_hat = div_hy_hat / Laplacian
-
-        u_x = np.real(ifft2(u_x_hat))
-        u_y = np.real(ifft2(u_y_hat))
-
-        # Step 5: New grid
-        X_new = X + u_x
-        Y_new = Y + u_y
-
-        # Center around the center of mass
-        X_com = np.mean(X_new)
-        Y_com = np.mean(Y_new)
-        X_new -= X_com
-        Y_new -= Y_com
-
-        # Apply random rotation
-        theta = np.random.uniform(0, 2 * np.pi)  # Random rotation angle
-        rotation_matrix = np.array([[np.cos(theta), -np.sin(theta)], 
-                                    [np.sin(theta), np.cos(theta)]])
-        coords = np.stack([X_new.ravel(), Y_new.ravel()])
-        rotated_coords = rotation_matrix @ coords
-        X_new = rotated_coords[0].reshape(X_new.shape)
-        Y_new = rotated_coords[1].reshape(Y_new.shape)
-
-        # define discretization space
-        kvs = tuple(bspline.make_knots(deg, 0.0, 1.0, n-deg) for n in N)
-
-        geo = geometry.tensor_product(geometry.BSplineFunc(kvs[0], np.linspace(0, 1,kvs[0].numdofs)), geometry.BSplineFunc(kvs[1], np.linspace(0,1,kvs[1].numdofs)))
-        # Update geo.coeffs with new coordinates
-        geo.coeffs = np.stack([Y_new, X_new], axis=-1)
-
-        J = geo.grid_jacobian([s.greville()[1:-1] for s in kvs])
-        J = np.linalg.det(J).min() / np.linalg.det(J).max()
-        #print("Jacobian determinant ratio:", J)
-        
-    return geo, kvs, X_new, Y_new
-
-def _deprecated_generate_bcs(geo, kvs, scale = 2.0, sigma=16.0):
-    # Define boundary conditions
-
-    g = lambda x,y: 0*x # source term
-    # compute Dirichlet boundary conditions
-    bcs = assemble.compute_dirichlet_bcs(kvs, geo, [('left', g), ('top', g), ('right', g), ('bottom', g)])
+def solve_pde(equation, n_samples, N, output_file, deg=2, epsilon_strain=4.0, epsilon_rotation=4.0, 
+              bc_scale=2.0, bc_sigma=8.0, wave_number_range=(2.0, 16.0)):
+    """
+    Solve PDE and generate dataset for either Poisson or Helmholtz equation.
     
-    V = scale * np.random.randn() * gaussian_filter(np.random.randn(*geo.coeffs.shape[:2]), sigma=sigma).flatten()
+    Args:
+        equation: "poisson" or "helmholtz"
+        n_samples: Number of samples to generate
+        N: Grid size tuple (nx, ny)
+        output_file: Output HDF5 file path
+        deg: B-spline degree
+        epsilon_strain: Strain parameter for geometry generation
+        epsilon_rotation: Rotation parameter for geometry generation
+        bc_scale: Boundary condition scale
+        bc_sigma: Boundary condition sigma
+        wave_number_range: Tuple (min, max) for random wave number generation (Helmholtz only)
+    """
+    # Create output directory if it doesn't exist
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
     
-    bcs[1][:] = V[bcs[0]]
-    return bcs
-
-
-
-
-
-# Example usage
-if __name__ == "__main__":
-    n_samples = 200
-    N = (32, 32)
-    deg = 2
-    equation = "poisson" 
-    output_file = "generated_data_small_test.h5"
-
     with h5py.File(output_file, "w") as h5f:
         solutions_dataset = h5f.create_dataset("solutions", (n_samples, np.prod(N)), dtype=np.float64)
         geo_coeffs_dataset = h5f.create_dataset("geo_coeffs", (n_samples, 2 * np.prod(N)), dtype=np.float64)
+        
+        # Create wave number dataset for Helmholtz equation
+        if equation == "helmholtz":
+            wave_numbers_dataset = h5f.create_dataset("wave_numbers", (n_samples,), dtype=np.float64)
 
-        for k in tqdm(range(n_samples), desc="Generating samples"):
-            geo, spline_space, X_new, Y_new = generate_geom(N, deg)
-            bcs = generate_bcs(geo, spline_space)
+        for k in tqdm(range(n_samples), desc=f"Generating {equation} samples"):
+            geo, spline_space, X_new, Y_new = generate_geom(N, deg, epsilon_strain=epsilon_strain, epsilon_rotation=epsilon_rotation)
+            bcs = generate_bcs(geo, spline_space, scale=bc_scale, sigma=bc_sigma)
+            
+            # Generate random wave number for Helmholtz equation
+            if equation == "helmholtz":
+                wave_number = np.random.uniform(wave_number_range[0], wave_number_range[1])
             
             rhs = assemble.inner_products(spline_space, lambda x, y: 0 * x, f_physical=True, geo=geo).ravel()
             if equation == "poisson":
                 A = assemble.stiffness(spline_space, geo)
                 LS = assemble.RestrictedLinearSystem(A, rhs, bcs)
+            elif equation == "helmholtz":
+                # Assemble matrices for Helmholtz equation: -∇²u + k²u = f
+                A = assemble.stiffness(spline_space, geo)  # Stiffness matrix (-∇² term)
+                M = assemble.mass(spline_space, geo)       # Mass matrix (k²u term)
+                # Combine matrices: -A + k²M (note: stiffness matrix already has negative sign)
+                combined_matrix = -A + wave_number**2 * M
+                LS = assemble.RestrictedLinearSystem(combined_matrix, rhs, bcs)
             else:
                 raise ValueError(f"Unknown equation: {equation}")
 
             u = scipy.sparse.linalg.spsolve(LS.A, LS.b)
             u_func = geometry.BSplineFunc(spline_space, LS.complete(u))
 
+            # Get the matrix to store (either A for Poisson or combined_matrix for Helmholtz)
+            if equation == "poisson":
+                matrix_to_store = A
+            elif equation == "helmholtz":
+                matrix_to_store = combined_matrix
+            else:
+                raise ValueError(f"Unknown equation: {equation}")
+
             # Create datasets dynamically in the first iteration when sizes are known
             if k == 0:
-                mats_data_dataset = h5f.create_dataset("mats_data", (n_samples, A.data.shape[0]), dtype=np.float64)
-                mats_indices_dataset = h5f.create_dataset("mats_indices", (n_samples, A.indices.shape[0]), dtype=np.int32)
-                mats_indptr_dataset = h5f.create_dataset("mats_indptr", (n_samples, A.indptr.shape[0]), dtype=np.int32)
+                mats_data_dataset = h5f.create_dataset("mats_data", (n_samples, matrix_to_store.data.shape[0]), dtype=np.float64)
+                mats_indices_dataset = h5f.create_dataset("mats_indices", (n_samples, matrix_to_store.indices.shape[0]), dtype=np.int32)
+                mats_indptr_dataset = h5f.create_dataset("mats_indptr", (n_samples, matrix_to_store.indptr.shape[0]), dtype=np.int32)
                 rhs_dataset = h5f.create_dataset("rhs", (n_samples, rhs.shape[0]), dtype=np.float64)
 
             # Save data to HDF5
             solutions_dataset[k] = u_func.coeffs.flatten()
-            mats_data_dataset[k, :A.data.shape[0]] = A.data
-            mats_indices_dataset[k, :A.indices.shape[0]] = A.indices
-            mats_indptr_dataset[k, :A.indptr.shape[0]] = A.indptr
+            mats_data_dataset[k, :matrix_to_store.data.shape[0]] = matrix_to_store.data
+            mats_indices_dataset[k, :matrix_to_store.indices.shape[0]] = matrix_to_store.indices
+            mats_indptr_dataset[k, :matrix_to_store.indptr.shape[0]] = matrix_to_store.indptr
             rhs_dataset[k, :rhs.shape[0]] = rhs
             geo_coeffs_dataset[k] = geo.coeffs.flatten()
+            
+            # Save wave number for Helmholtz equation
+            if equation == "helmholtz":
+                wave_numbers_dataset[k] = wave_number
 
         # Ensure data is written to disk
         h5f.flush()
-
-    plt.figure()
-    vis.plot_geo(geo, grid = 32)
-    plt.savefig("generated_geometry.jpg")
     
-    plt.figure()
-    vis.plot_field(u_func, geo)
-    plt.savefig("generated_field.jpg")
+    print(f"Generated {n_samples} samples for {equation} equation with grid size {N}")
+    return geo, u_func
+
+
+# Main function to generate different datasets
+if __name__ == "__main__":
+    # Generate Poisson datasets with 32x32 grid
+    print("Generating Poisson datasets...")
+    
+    # Poisson training dataset
+    solve_pde(
+        equation="poisson",
+        n_samples=32768,
+        N=(32, 32),
+        output_file="data/poisson_small/dataset_train.h5",
+        deg=2,
+        epsilon_strain=4.0,
+        epsilon_rotation=4.0,
+        bc_scale=2.0,
+        bc_sigma=8.0
+    )
+    
+    # Poisson test dataset
+    solve_pde(
+        equation="poisson",
+        n_samples=1024,
+        N=(32, 32),
+        output_file="data/poisson_small/dataset_test.h5",
+        deg=2,
+        epsilon_strain=4.0,
+        epsilon_rotation=4.0,
+        bc_scale=2.0,
+        bc_sigma=8.0
+    )
+    
+    # Generate Helmholtz datasets with 128x128 grid
+    print("Generating Helmholtz datasets...")
+    
+    # Helmholtz training dataset
+    solve_pde(
+        equation="helmholtz",
+        n_samples=32768,
+        N=(128, 128),
+        output_file="data/helmholtz/dataset_train.h5",
+        deg=2,
+        epsilon_strain=4.0,
+        epsilon_rotation=4.0,
+        bc_scale=2.0,
+        bc_sigma=8.0,
+        wave_number_range=(2.0, 16.0)
+    )
+    
+    # Helmholtz test dataset
+    solve_pde(
+        equation="helmholtz",
+        n_samples=1024,
+        N=(128, 128),
+        output_file="data/helmholtz/dataset_test.h5",
+        deg=2,
+        epsilon_strain=4.0,
+        epsilon_rotation=4.0,
+        bc_scale=2.0,
+        bc_sigma=8.0,
+        wave_number_range=(2.0, 16.0)
+    )
+    
+    print("All datasets generated successfully!")
