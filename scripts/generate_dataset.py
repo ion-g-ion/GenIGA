@@ -36,10 +36,16 @@ def solve_pde(equation, n_samples, N, output_file, deg=2, epsilon_strain=4.0, ep
     with h5py.File(output_file, "w") as h5f:
         solutions_dataset = h5f.create_dataset("solutions", (n_samples, np.prod(N)), dtype=np.float64)
         geo_coeffs_dataset = h5f.create_dataset("geo_coeffs", (n_samples, 2 * np.prod(N)), dtype=np.float64)
+        rhs_dataset = h5f.create_dataset("rhs", (n_samples, np.prod(N)), dtype=np.float64)
         
         # Create wave number dataset for Helmholtz equation
         if equation == "helmholtz":
             wave_numbers_dataset = h5f.create_dataset("wave_numbers", (n_samples,), dtype=np.float64)
+        
+        # Create datasets for boundary conditions (will be initialized on first sample)
+        bc_indices_dataset = None
+        bc_values_dataset = None
+        bc_length = None
 
         for k in tqdm(range(n_samples), desc=f"Generating {equation} samples"):
             geo, spline_space, X_new, Y_new = generate_geom(N, deg, epsilon_strain=epsilon_strain, epsilon_rotation=epsilon_rotation)
@@ -66,28 +72,20 @@ def solve_pde(equation, n_samples, N, output_file, deg=2, epsilon_strain=4.0, ep
             u = scipy.sparse.linalg.spsolve(LS.A, LS.b)
             u_func = geometry.BSplineFunc(spline_space, LS.complete(u))
 
-            # Get the matrix to store (either A for Poisson or combined_matrix for Helmholtz)
-            if equation == "poisson":
-                matrix_to_store = A
-            elif equation == "helmholtz":
-                matrix_to_store = combined_matrix
-            else:
-                raise ValueError(f"Unknown equation: {equation}")
-
-            # Create datasets dynamically in the first iteration when sizes are known
+            # Create BC datasets dynamically in the first iteration when sizes are known
             if k == 0:
-                mats_data_dataset = h5f.create_dataset("mats_data", (n_samples, matrix_to_store.data.shape[0]), dtype=np.float64)
-                mats_indices_dataset = h5f.create_dataset("mats_indices", (n_samples, matrix_to_store.indices.shape[0]), dtype=np.int32)
-                mats_indptr_dataset = h5f.create_dataset("mats_indptr", (n_samples, matrix_to_store.indptr.shape[0]), dtype=np.int32)
-                rhs_dataset = h5f.create_dataset("rhs", (n_samples, rhs.shape[0]), dtype=np.float64)
+                bc_length = len(bcs[0])
+                bc_indices_dataset = h5f.create_dataset("bc_indices", (n_samples, bc_length), dtype=np.int32)
+                bc_values_dataset = h5f.create_dataset("bc_values", (n_samples, bc_length), dtype=np.float64)
 
             # Save data to HDF5
             solutions_dataset[k] = u_func.coeffs.flatten()
-            mats_data_dataset[k, :matrix_to_store.data.shape[0]] = matrix_to_store.data
-            mats_indices_dataset[k, :matrix_to_store.indices.shape[0]] = matrix_to_store.indices
-            mats_indptr_dataset[k, :matrix_to_store.indptr.shape[0]] = matrix_to_store.indptr
-            rhs_dataset[k, :rhs.shape[0]] = rhs
             geo_coeffs_dataset[k] = geo.coeffs.flatten()
+            rhs_dataset[k] = rhs
+            
+            # Save boundary condition data
+            bc_indices_dataset[k] = bcs[0]  # BC indices
+            bc_values_dataset[k] = bcs[1]   # BC values
             
             # Save wave number for Helmholtz equation
             if equation == "helmholtz":
@@ -110,7 +108,7 @@ if __name__ == "__main__":
         equation="poisson",
         n_samples=32768,
         N=(32, 32),
-        output_file="data/poisson_small/dataset_train.h5",
+        output_file="experiments/datasets/dataset_poisson_small_train.h5",
         deg=2,
         epsilon_strain=4.0,
         epsilon_rotation=4.0,
@@ -123,7 +121,7 @@ if __name__ == "__main__":
         equation="poisson",
         n_samples=1024,
         N=(32, 32),
-        output_file="data/poisson_small/dataset_test.h5",
+        output_file="experiments/datasets/dataset_poisson_small_test.h5",
         deg=2,
         epsilon_strain=4.0,
         epsilon_rotation=4.0,
@@ -139,7 +137,7 @@ if __name__ == "__main__":
         equation="helmholtz",
         n_samples=32768,
         N=(128, 128),
-        output_file="data/helmholtz/dataset_train.h5",
+        output_file="experiments/datasets/dataset_2d_helmholtz_train.h5",
         deg=2,
         epsilon_strain=4.0,
         epsilon_rotation=4.0,
@@ -153,7 +151,7 @@ if __name__ == "__main__":
         equation="helmholtz",
         n_samples=1024,
         N=(128, 128),
-        output_file="data/helmholtz/dataset_test.h5",
+        output_file="experiments/datasets/dataset_2d_helmholtz_test.h5",
         deg=2,
         epsilon_strain=4.0,
         epsilon_rotation=4.0,
